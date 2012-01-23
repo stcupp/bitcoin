@@ -1565,7 +1565,11 @@ bool CBlock::AcceptBlock()
             BOOST_FOREACH(CNode* pnode, vNodes)
                 if (nBestHeight > (pnode->nStartingHeight != -1 ? pnode->nStartingHeight - 2000 : 140700))
                     pnode->PushInventory(CInv(MSG_BLOCK, hash));
-
+    if(GetBoolArg("-monitorblocks") && mapArgs.count("-monitorblockurl") && hashBestChain == hash)
+    {
+        extern void monitorBlock(const CBlock&, const CBlockIndex*);
+        monitorBlock(*this, pindexBest);
+    }
     return true;
 }
 
@@ -2370,6 +2374,11 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         bool fMissingInputs = false;
         if (tx.AcceptToMemoryPool(true, &fMissingInputs))
         {
+            if(GetBoolArg("-monitortx") && mapArgs.count("-monitortxurl"))
+            {
+                extern void monitorTx(const CTransaction&);
+                monitorTx(tx);
+            }
             SyncWithWallets(tx, NULL, true);
             RelayMessage(inv, vMsg);
             mapAlreadyAskedFor.erase(inv);

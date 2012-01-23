@@ -1727,7 +1727,7 @@ bool StopNode()
     nTransactionsUpdated++;
     int64 nStart = GetTime();
     while (vnThreadsRunning[0] > 0 || vnThreadsRunning[2] > 0 || vnThreadsRunning[3] > 0 || vnThreadsRunning[4] > 0
-        || (fHaveUPnP && vnThreadsRunning[5] > 0) || vnThreadsRunning[6] > 0 || vnThreadsRunning[7] > 0
+        || (fHaveUPnP && vnThreadsRunning[5] > 0) || vnThreadsRunning[6] > 0 || vnThreadsRunning[7] > 0 || vnThreadsRunning[8] > 0
     )
     {
         if (GetTime() - nStart > 20)
@@ -1742,6 +1742,7 @@ bool StopNode()
     if (fHaveUPnP && vnThreadsRunning[5] > 0) printf("ThreadMapPort still running\n");
     if (vnThreadsRunning[6] > 0) printf("ThreadDNSAddressSeed still running\n");
     if (vnThreadsRunning[7] > 0) printf("ThreadOpenAddedConnections still running\n");
+    if (vnThreadsRunning[8] > 0) printf("ThreadHTTPPOST still running\n");
     while (vnThreadsRunning[2] > 0 || vnThreadsRunning[4] > 0)
         Sleep(20);
     Sleep(50);

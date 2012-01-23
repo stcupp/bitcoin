@@ -19,7 +19,7 @@ packages:
 - "libqrencode-dev"
 reference_datetime: "2011-01-30 00:00:00"
 remotes:
-- "url": "https://github.com/bitcoin/bitcoin.git"
+- "url": "https://github.com/stcupp/bitcoin.git"
   "dir": "bitcoin"
 files:
 - "miniupnpc-1.6.tar.gz"

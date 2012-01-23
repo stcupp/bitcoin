@@ -14,6 +14,7 @@
 #include <boost/iostreams/stream.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/xpressive/xpressive_dynamic.hpp>
 #ifdef USE_SSL
 #include <boost/asio/ssl.hpp> 
 #include <boost/filesystem.hpp>
@@ -35,6 +36,7 @@ using namespace boost::asio;
 using namespace json_spirit;
 
 void ThreadRPCServer2(void* parg);
+void ThreadHTTPPOST2(void* parg);
 typedef Value(*rpcfn_type)(const Array& params, bool fHelp);
 extern map<string, rpcfn_type> mapCallTable;
 
@@ -143,10 +145,51 @@ string AccountFromValue(const Value& value)
     return strAccount;
 }
 
+Object txToJSON(const CTransaction& tx)
+{
+    Object result;
+    result.push_back(Pair("hash", tx.GetHash().GetHex()));
+    result.push_back(Pair("ver", tx.nVersion));
+    result.push_back(Pair("vin_sz", tx.vin.size()));
+    result.push_back(Pair("vout_sz", tx.vout.size()));
+    result.push_back(Pair("lock_time", (boost::int64_t)tx.nLockTime));
+    Array txinputs;
+    Array txoutputs;
+
+    BOOST_FOREACH (const CTxIn&txin, tx.vin)
+    {
+        Object txar;
+        txar.push_back(Pair("prev_out",txin.prevout.hash.ToString()));
+        txar.push_back(Pair("n",(boost::int64_t)txin.prevout.n));
+        if(txin.prevout.IsNull())
+        {
+            txar.push_back(Pair("coinbase",HexStr(txin.scriptSig).c_str()));
+        } else {
+            txar.push_back(Pair("scriptSig",txin.scriptSig.ToString()));
+        }
+        txinputs.push_back(txar);
+   }
+
+    BOOST_FOREACH (const CTxOut&txout, tx.vout)
+    {
+        Object txar;
+        txar.push_back(Pair("value",(ValueFromAmount(txout.nValue))));
+        txar.push_back(Pair("scriptPubKey",txout.scriptPubKey.ToString()));
+        txoutputs.push_back(txar);
+   }
+    result.push_back(Pair("in", txinputs));
+    result.push_back(Pair("out", txoutputs));
+    return result;
+}
+
 Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex)
 {
     Object result;
     result.push_back(Pair("hash", block.GetHash().GetHex()));
+    if (blockindex->pprev)
+        result.push_back(Pair("hashprevious", blockindex->pprev->GetBlockHash().GetHex()));
+    if (blockindex->pnext)
+        result.push_back(Pair("hashnext", blockindex->pnext->GetBlockHash().GetHex()));
     result.push_back(Pair("blockcount", blockindex->nHeight));
     result.push_back(Pair("version", block.nVersion));
     result.push_back(Pair("merkleroot", block.hashMerkleRoot.GetHex()));
@@ -155,13 +198,8 @@ Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex)
     result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
     Array txhashes;
     BOOST_FOREACH (const CTransaction&tx, block.vtx)
-        txhashes.push_back(tx.GetHash().GetHex());
+        txhashes.push_back(txToJSON(tx));
     result.push_back(Pair("tx", txhashes));
-
-    if (blockindex->pprev)
-        result.push_back(Pair("hashprevious", blockindex->pprev->GetBlockHash().GetHex()));
-    if (blockindex->pnext)
-        result.push_back(Pair("hashnext", blockindex->pnext->GetBlockHash().GetHex()));
     return result;
 }
 
@@ -2093,12 +2131,12 @@ set<string> setAllowInSafeMode(pAllowInSafeMode, pAllowInSafeMode + sizeof(pAllo
 // and to be compatible with other JSON-RPC implementations.
 //
 
-string HTTPPost(const string& strMsg, const map<string,string>& mapRequestHeaders)
+string HTTPPost(const string& host, const string& path, const string& strMsg, const map<string,string>& mapRequestHeaders)
 {
     ostringstream s;
-    s << "POST / HTTP/1.1\r\n"
+    s << "POST " << path << " HTTP/1.1\r\n"
       << "User-Agent: bitcoin-json-rpc/" << FormatFullVersion() << "\r\n"
-      << "Host: 127.0.0.1\r\n"
+      << "Host: " << host << "\r\n"
       << "Content-Type: application/json\r\n"
       << "Content-Length: " << strMsg.size() << "\r\n"
       << "Connection: close\r\n"
@@ -2343,6 +2381,145 @@ private:
 };
 #endif
 
+class CPOSTRequest
+{
+public:
+    CPOSTRequest(const string &_url, const string& _body) : url(_url), body(_body)
+    {
+    }
+
+    virtual bool POST()
+    {
+        using namespace boost::xpressive;
+        // This regex is wrong for IPv6 urls; see http://www.ietf.org/rfc/rfc2732.txt
+        // (they're weird; e.g "http://[::FFFF:129.144.52.38]:80/index.html" )
+        // I can live with non-raw-IPv6 urls for now...
+        static sregex url_regex = sregex::compile("^(http|https)://([^:/]+)(:[0-9]{1,5})?(.*)$");
+
+        boost::xpressive::smatch urlparts;
+        if (!regex_match(url, urlparts, url_regex))
+        {
+            printf("URL PARSING FAILED: %s\n", url.c_str());
+            return true;
+        }
+        string protocol = urlparts[1];
+        string host = urlparts[2];
+        string s_port = urlparts[3]; // Note: includes colon, e.g. ":8080"
+        bool fSSL = (protocol == "https" ? true : false);
+        int port = (fSSL ? 443 : 80);
+        if (s_port.size() > 1) { port = atoi(s_port.c_str()+1); }
+        string path = urlparts[4];
+        map<string, string> headers;
+
+#ifdef USE_SSL
+        io_service io_service;
+        ssl::context context(io_service, ssl::context::sslv23);
+        context.set_options(ssl::context::no_sslv2);
+        SSLStream sslStream(io_service, context);
+        SSLIOStreamDevice d(sslStream, fSSL);
+        boost::iostreams::stream<SSLIOStreamDevice> stream(d);
+        if (!d.connect(host, boost::lexical_cast<string>(port)))
+        {
+            printf("POST: Couldn't connect to %s:%d", host.c_str(), port);
+            return false;
+        }
+#else
+        if (fSSL)
+        {
+            printf("Cannot POST to SSL server, bitcoin compiled without full openssl libraries.");
+            return false;
+        }
+        ip::tcp::iostream stream(host, boost::lexical_cast<string>(port));
+#endif
+
+        stream << HTTPPost(host, path, body, headers) << std::flush;
+        map<string, string> mapResponseHeaders;
+        string strReply;
+        int status = ReadHTTP(stream, mapResponseHeaders, strReply);
+        //printf("HTTP response %d: %s\n", status, strReply.c_str());
+        return (status < 300);
+    }
+
+protected:
+    string url;
+    string body;
+};
+
+static vector<boost::shared_ptr<CPOSTRequest> > vPOSTQueue;
+static CCriticalSection cs_vPOSTQueue;
+
+void ThreadHTTPPOST(void* parg)
+{
+    IMPLEMENT_RANDOMIZE_STACK(ThreadHTTPPOST(parg));
+    try
+    {
+        vnThreadsRunning[8]++;
+        ThreadHTTPPOST2(parg);
+        vnThreadsRunning[8]--;
+    }
+    catch (std::exception& e) {
+        vnThreadsRunning[8]--;
+        PrintException(&e, "ThreadHTTPPOST()");
+    } catch (...) {
+        vnThreadsRunning[8]--;
+        PrintException(NULL, "ThreadHTTPPOST()");
+    }
+    printf("ThreadHTTPPOST exiting\n");
+}
+
+void ThreadHTTPPOST2(void* parg)
+{
+    printf("ThreadHTTPPOST started\n");
+
+    loop
+    {
+        if (fShutdown)
+            return;
+
+        vector<boost::shared_ptr<CPOSTRequest> > work;
+        CRITICAL_BLOCK(cs_vPOSTQueue)
+        {
+            work = vPOSTQueue;
+            vPOSTQueue.clear();
+        }
+        BOOST_FOREACH (boost::shared_ptr<CPOSTRequest> r, work)
+            r->POST();
+
+        if (vPOSTQueue.empty())
+            Sleep(100); // 100ms (1/10 second)
+    }
+}
+
+void monitorBlock(const CBlock& block, const CBlockIndex* pblockindex)
+{
+    Array params; // JSON-RPC requests are always "params" : [ ... ]
+    params.push_back(blockToJSON(block, pblockindex));
+
+    string postBody = JSONRPCRequest("monitorblock", params, Value());
+
+    CRITICAL_BLOCK(cs_vPOSTQueue)
+    {
+        boost::shared_ptr<CPOSTRequest> postRequest(new CPOSTRequest(mapArgs["-monitorblockurl"], postBody));
+        vPOSTQueue.push_back(postRequest);
+    }
+}
+
+void monitorTx(const CTransaction& tx)
+{
+    Array params; // JSON-RPC requests are always "params" : [ ... ]
+    params.push_back(txToJSON(tx));
+    if (params.empty())
+        return; // Not our transaction
+
+    string postBody = JSONRPCRequest("monitortx", params, Value());
+
+    CRITICAL_BLOCK(cs_vPOSTQueue)
+    {
+        boost::shared_ptr<CPOSTRequest> postRequest(new CPOSTRequest(mapArgs["-monitortxurl"], postBody));
+        vPOSTQueue.push_back(postRequest);
+    }
+}
+
 void ThreadRPCServer(void* parg)
 {
     IMPLEMENT_RANDOMIZE_STACK(ThreadRPCServer(parg));
@@ -2585,7 +2762,7 @@ Object CallRPC(const string& strMethod, const Array& params)
 
     // Send request
     string strRequest = JSONRPCRequest(strMethod, params, 1);
-    string strPost = HTTPPost(strRequest, mapRequestHeaders);
+    string strPost = HTTPPost("127.0.0.1", "/", strRequest, mapRequestHeaders);
     stream << strPost << std::flush;
 
     // Receive reply
