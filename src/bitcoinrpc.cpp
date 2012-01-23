@@ -150,8 +150,8 @@ Object txToJSON(const CTransaction& tx)
     Object result;
     result.push_back(Pair("hash", tx.GetHash().GetHex()));
     result.push_back(Pair("ver", tx.nVersion));
-    result.push_back(Pair("vin_sz", tx.vin.size()));
-    result.push_back(Pair("vout_sz", tx.vout.size()));
+    result.push_back(Pair("vin_sz", (boost::int64_t)tx.vin.size()));
+    result.push_back(Pair("vout_sz", (boost::int64_t)tx.vout.size()));
     result.push_back(Pair("lock_time", (boost::int64_t)tx.nLockTime));
     Array txinputs;
     Array txoutputs;
